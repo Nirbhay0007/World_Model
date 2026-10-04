@@ -1,139 +1,101 @@
-Here is a step-by-step roadmap to build and simulate **Mini Flappy Bird** following the exact world model architecture from Lecture 3 (Ha & Schmidhuber style: VAE + Recurrent Dynamics).
+# Mini Flappy Bird: World Model Architecture & Neural Dreaming
+
+An end-to-end PyTorch implementation of a **World Model** (based on Ha & Schmidhuber, 2018) applied to a minimalist custom Flappy Bird environment (`MiniFlappy`). The model learns to compress visual frames into compact latent vectors, model physical dynamics over time, and simulate full interactive gameplay entirely inside its own imagination with the game engine turned off.
 
 ---
+
+## 🏗️ Architecture Overview
+
+The system consists of three foundational components:
+
+1. **Environment & Data Engine (`MiniFlappy`):**
+   - 32x32 RGB canvas (3,072 values per frame).
+   - Physics: Constant gravity (+0.3 px/step), flap impulse (-1.2 px/step), terminal speed (3.0 px/step), scrolling green pipes with vertical gaps.
+   - Discrete action space: `0 = Fall (Gravity)`, `1 = Flap (Impulse)`.
+
+2. **Vision Model (V - Variational Autoencoder):**
+   - **Encoder:** 3-layer Convolutional network (Conv2D -> BatchNorm -> ReLU) with stride 2, projecting high-dimensional frames down to a 32-dimensional continuous latent space (`z_dim = 32`).
+   - **Decoder:** 3-layer Transposed Convolutional network (ConvTranspose2D -> BatchNorm -> ReLU -> Sigmoid) mapping `z` back to the 32x32 RGB reconstruction.
+   - **Custom Weighted Reconstruction Loss:** Implemented a 15x pixel-weighting mask on bright bird and pipe pixels to prevent standard MSE from ignoring the tiny 2x2 bird footprint.
+
+3. **Memory / Dynamics Model (M - Recurrent GRU):**
+   - Single-layer GRU (`hidden_dim = 128`, `input_dim = 33` = 32 latent + 1 action).
+   - Linear prediction head mapping hidden state `h_(t+1)` to predicted next latent state `z_hat_(t+1)`.
+   - Loss: Latent Mean Squared Error (MSE) between predicted latent vector and target VAE-encoded latent vector.
+
+4. **Closed-Loop Simulator (Dreaming):**
+   - Game engine is completely disconnected.
+   - The model takes a single seed frame `z_0`, receives action sequences, and autoregressively feeds its own predicted `z_hat_t` back as input `z_(t+1)` to hallucinate long-horizon trajectories.
+
+---
+
+## 🚀 Completed Milestones & Results
 
 ### Phase 1: Environment Setup & Data Collection
+- Generated **200 unsupervised exploration episodes** of **100 steps each** (20,000 total frames).
+- Stored as PyTorch tensors:
+  - Frames: `(20000, 3, 32, 32)` normalized float32 tensor.
+  - Actions: `(200, 100, 1)` binary tensor.
 
-1. **Build a Lightweight Engine:**
-* Implement a minimalist Flappy Bird environment in Python (using `pygame` or headless `gymnasium`/NumPy).
-* **Grid:** Render frames in low resolution, either $32 \times 32$ or $64 \times 64$ pixels with 3 RGB channels (around 3,000 to 12,000 numbers per frame).
+### Phase 2: Vision Model Training & Pre-Encoding
+- Trained the VAE for 15 epochs using Adam optimizer (`lr = 1e-3`).
+- Compressed all 20,000 frames from **234.4 MB** down to an ultra-compact **2.44 MB** `latent_dataset` tensor of shape `(200, 100, 32)` (99% data compression ratio).
+- Reconstructions accurately preserve sharp green pipe boundaries and clear yellow bird positions.
 
+### Phase 3: Dynamics Model Training & 1-Step Validation
+- Trained the GRU over 20 epochs across batch size 32.
+- **Training Convergence:** Latent MSE loss dropped by **~90%** (from `0.3101` down to `0.0325`).
+- **1-Step Visual Verification:** Side-by-side comparison between ground truth frames and decoded 1-step predictions demonstrated accurate physics tracking for falling, jumping, and pipe motion.
 
-* **Bird:** Render as a high-contrast, bright block (e.g., 2 to 4 bright yellow pixels) to make tracking manageable.
-
-
-* **Pipes:** Green vertical bars with a fixed-height gap that scroll left by 1 pixel per step.
-
-
-* **Actions:** Define 2 discrete actions: $a_t \in \{0, 1\}$ (`0 = Do Nothing / Fall`, `1 = Flap / Jump`).
-
-
-
-
-2. **Collect Unsupervised Rollouts:**
-* Use a **random policy** to explore the physics: Flap with probability $p \approx 0.15$ to $0.20$ per step.
-
-
-* Collect roughly **200 episodes** of **100–120 steps** each (giving ~20,000 to 24,000 paired tuples: frame $o_t$ and action $a_t$).
-
-
-* The physics stays the same whether the player crashes or survives; you do not need an expert player. Save the collected dataset to disk as NumPy arrays.
-
-
-
-
+### Phase 4: Closed-Loop Dreaming (Neural Simulation)
+- **Gravity Fall Experiment (`[0] * 30`):**
+  - Model imagined quadratic downward acceleration, reached the floor in exactly 10 steps, maintained floor boundary collision, and scrolled the pipe across the screen.
+- **Periodic Flapping Flight (`[1, 0, 0, 0, 0, ...]`):**
+  - When given periodic flap commands (every 5 steps), the model hallucinated upward lift against gravity and navigated the bird directly through the scrolling green pipe gap over a 30-step filmstrip.
+- **Warm-Start vs. Cold-Start Dynamics:**
+  - Discovered that providing a 5-step warm-up memory (`h_5`) provides crucial velocity context that completely eliminates initial cold-start ghosting artifacts.
 
 ---
 
-### Phase 2: Vision Model (Variational Autoencoder)
+## 📂 Project Structure
 
-1. **Architecture:**
-* **Encoder:** 3 to 4 Convolutional layers (with stride 2) compressing the image down to a compact continuous latent vector $z_t \in \mathbb{R}^{16}$ or $\mathbb{R}^{32}$ (predicting mean $\mu$ and log-variance $\log \sigma^2$).
-
-
-* **Decoder:** Transposed convolutions mapping $z_t$ back to the original image dimensions.
-
-
-
-
-2. **Crucial Loss Fix (From Mini Pong):**
-* A standard MSE reconstruction loss will cause the network to reconstruct the large green pipes accurately while **completely erasing the small bird**, because 4 bird pixels out of 1,024 contribute negligible error.
-
-
-* **Fix:** Apply a weighted MSE loss that heavily penalizes errors on bright/foreground bird pixels relative to empty background pixels.
-
-
-* Train the VAE until reconstructions preserve sharp pipe edges and clear bird visibility. Once trained, freeze the VAE and pre-encode all 200 episodes into latent sequences $\{z_0, z_1, \dots, z_T\}$.
-
-
-
-
+```text
+World_Model/
+├── Flappy_world_model/
+│   ├── mini_floppy.ipynb   # Main Jupyter notebook containing complete implementation
+│   ├── roadmap.md          # Project documentation & milestone report
+│   ├── vae_model.pth       # Saved weights for trained VAE Vision Model
+│   └── memory_model.pth    # Saved weights for trained GRU Dynamics Model
+└── .agents/                # Coding guidelines & agent rules
+```
 
 ---
 
-### Phase 3: Dynamics / Memory Model (RNN / GRU)
+## 🛠️ How to Run & Reproduce
 
-1. **Architecture:**
-* Single-frame observations lack velocity information (a static snapshot cannot reveal whether the bird is ascending or falling under gravity).
+1. **Prerequisites:**
+   ```bash
+   pip install torch torchvision numpy matplotlib ipywidgets
+   ```
 
+2. **Open the Notebook:**
+   Launch Jupyter and open `Flappy_world_model/mini_floppy.ipynb`.
 
-* Build a **Recurrent Network (GRU or LSTM)** with a hidden state dimension of $h \in \mathbb{R}^{128}$ or $\mathbb{R}^{256}$.
-
-
-* **Input at step $t$:** Concatenation of current latent and action $[z_t, a_t]$ along with previous hidden state $h_t$.
-
-
-* **Memory Update:** $h_{t+1} = \text{GRU}([z_t, a_t], h_t)$.
-
-
-* **Prediction Head:** A linear/MLP head on top of $h_{t+1}$ that predicts the next latent vector $\hat{z}_{t+1}$.
-
-
-
-
-2. **Training:**
-* Train over trajectory slices minimizing the MSE loss:
-
-$$\mathcal{L}_{\text{dynamics}} = \Vert{}\hat{z}_{t+1} - z_{t+1}^{\text{target}}\Vert{}^2$$
-
-
-
-between the predicted code and the actual VAE-encoded code from the next frame in the dataset.
-
-
-* Track that loss decreases across time steps as the recurrent memory fills up with velocity history.
-
-
-
-
+3. **Execution Flow:**
+   - **Cells 1–10:** Environment creation & rollout collection.
+   - **Cells 11–20:** VAE definition, training, and dataset pre-encoding.
+   - **Cells 21–35:** GRU Memory Model definition, training, and 1-step validation.
+   - **Cells 36–43:** Closed-loop dream simulation, filmstrips, and model checkpoint saving.
 
 ---
 
-### Phase 4: Interactive Simulation ("Dreaming" with Engine Off)
+## 🔬 Core Insights & Key Learnings
 
-1. **Closed-Loop Unrolling:**
-* Initialize memory $h_0$ as a zero vector and feed in the initial starting frame $o_0$ encoded into $z_0$.
+1. **Pixel Space vs. Latent Space Dynamics:**
+   Predicting future states in a 32-dimensional latent space is orders of magnitude faster and computationally lighter than predicting raw 3,072-pixel matrices directly.
 
+2. **Weighted Reconstruction Loss:**
+   Without spatial loss weighting, small critical objects (like a 4-pixel bird on a 1,024-pixel grid) get averaged out as background noise by standard MSE loss.
 
-* **Turn the game engine off entirely:**
-
-1. Player selects action $a_t$ (e.g., via keyboard spacebar).
-
-
-2. Update recurrent memory: $h_{t+1} = \text{GRU}([z_t, a_t], h_t)$.
-
-
-3. Predict next latent code: $\hat{z}_{t+1} = \text{MLP}(h_{t+1})$.
-
-
-4. Decode into a visual image: $\hat{o}_{t+1} = \text{Decoder}(\hat{z}_{t+1})$.
-
-
-5. Feed $\hat{z}_{t+1}$ back as the input latent for step $t+1$.
-
-
-
-
-
-
-2. **Validation & Next Steps:**
-* Verify whether the bird bounces upward when flapping and smoothly falls under simulated gravity.
-
-
-* Check for **compounding error**: In purely deterministic models, autoregressive feedback can cause scrolling pipe edges to blur or warp after 20–40 steps. If pipe blur occurs, the natural progression is to upgrade from Lecture 3's deterministic GRU to Lecture 4's **RSSM (combining deterministic state $h$ with stochastic state $s$)**.
-
-
-
-
-
-Would you like the PyTorch skeleton code for either the weighted VAE or the GRU dynamics predictor to get started?
+3. **Compounding Autoregressive Error:**
+   Pure deterministic world models can sustain realistic imagination horizons for 15–25 steps. To extend imagination horizons further without blur or mode collapse, advanced architectures introduce stochastic latent transitions (e.g. RSSM in Dreamer).
